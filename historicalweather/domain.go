@@ -53,12 +53,6 @@ func (Domain) Register(app *kit.App) {
 		Group:   "read",
 		List:    true,
 		Summary: "Get daily historical weather records for a location and date range",
-		Args: []kit.Arg{
-			{Name: "lat", Help: "latitude"},
-			{Name: "lon", Help: "longitude"},
-			{Name: "start", Help: "start date YYYY-MM-DD"},
-			{Name: "end", Help: "end date YYYY-MM-DD"},
-		},
 	}, dailyOp)
 
 	// hourly: get hourly historical weather records
@@ -67,12 +61,6 @@ func (Domain) Register(app *kit.App) {
 		Group:   "read",
 		List:    true,
 		Summary: "Get hourly historical weather records for a location and date range",
-		Args: []kit.Arg{
-			{Name: "lat", Help: "latitude"},
-			{Name: "lon", Help: "longitude"},
-			{Name: "start", Help: "start date YYYY-MM-DD"},
-			{Name: "end", Help: "end date YYYY-MM-DD"},
-		},
 	}, hourlyOp)
 }
 
@@ -97,24 +85,28 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 // --- inputs ---
 
 type dailyInput struct {
-	Lat    float64 `kit:"arg" help:"latitude"`
-	Lon    float64 `kit:"arg" help:"longitude"`
-	Start  string  `kit:"arg" help:"start date YYYY-MM-DD"`
-	End    string  `kit:"arg" help:"end date YYYY-MM-DD"`
+	Lat    float64 `kit:"flag" help:"latitude"`
+	Lon    float64 `kit:"flag" help:"longitude"`
+	Start  string  `kit:"flag" help:"start date (YYYY-MM-DD)"`
+	End    string  `kit:"flag" help:"end date (YYYY-MM-DD)"`
 	Client *Client `kit:"inject"`
 }
 
 type hourlyInput struct {
-	Lat    float64 `kit:"arg" help:"latitude"`
-	Lon    float64 `kit:"arg" help:"longitude"`
-	Start  string  `kit:"arg" help:"start date YYYY-MM-DD"`
-	End    string  `kit:"arg" help:"end date YYYY-MM-DD"`
+	Lat    float64 `kit:"flag" help:"latitude"`
+	Lon    float64 `kit:"flag" help:"longitude"`
+	Start  string  `kit:"flag" help:"start date (YYYY-MM-DD)"`
+	End    string  `kit:"flag" help:"end date (YYYY-MM-DD)"`
+	Limit  int     `kit:"flag,inherit" help:"max hourly records"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
 func dailyOp(ctx context.Context, in dailyInput, emit func(*DailyRecord) error) error {
+	if in.Start == "" || in.End == "" {
+		return errs.Usage("--start and --end are required (YYYY-MM-DD)")
+	}
 	records, err := in.Client.DailyHistory(ctx, in.Lat, in.Lon, in.Start, in.End)
 	if err != nil {
 		return mapErr(err)
@@ -128,7 +120,10 @@ func dailyOp(ctx context.Context, in dailyInput, emit func(*DailyRecord) error) 
 }
 
 func hourlyOp(ctx context.Context, in hourlyInput, emit func(*HourlyRecord) error) error {
-	records, err := in.Client.HourlyHistory(ctx, in.Lat, in.Lon, in.Start, in.End)
+	if in.Start == "" || in.End == "" {
+		return errs.Usage("--start and --end are required (YYYY-MM-DD)")
+	}
+	records, err := in.Client.HourlyHistory(ctx, in.Lat, in.Lon, in.Start, in.End, in.Limit)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -153,7 +148,7 @@ func (Domain) Classify(input string) (uriType, id string, err error) {
 	if isLatLon(input) {
 		return "location", input, nil
 	}
-	return "query", input, nil
+	return "city", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
@@ -165,11 +160,11 @@ func (Domain) Locate(uriType, id string) (string, error) {
 			return "", errs.Usage("location id must be lat,lon: %q", id)
 		}
 		return fmt.Sprintf(
-			"https://%s/v1/archive?latitude=%s&longitude=%s&start_date=2024-01-01&end_date=2024-01-07&daily=temperature_2m_max",
+			"https://%s/v1/archive?latitude=%s&longitude=%s",
 			Host, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]),
 		), nil
-	case "query":
-		return fmt.Sprintf("https://%s/v1/archive?%s", Host, id), nil
+	case "city":
+		return fmt.Sprintf("https://%s/v1/archive?q=%s", Host, id), nil
 	default:
 		return "", errs.Usage("historicalweather has no resource type %q", uriType)
 	}

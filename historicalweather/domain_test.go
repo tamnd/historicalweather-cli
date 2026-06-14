@@ -32,6 +32,7 @@ func TestClassifyLatLon(t *testing.T) {
 		{"52.52,13.41", "location", "52.52,13.41"},
 		{"-33.87,151.21", "location", "-33.87,151.21"},
 		{"0,0", "location", "0,0"},
+		{"48.8,2.3", "location", "48.8,2.3"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
@@ -42,14 +43,15 @@ func TestClassifyLatLon(t *testing.T) {
 	}
 }
 
-func TestClassifyQuery(t *testing.T) {
+func TestClassifyCity(t *testing.T) {
 	cases := []struct {
 		in  string
 		typ string
 		id  string
 	}{
-		{"Berlin", "query", "Berlin"},
-		{"latitude=52.52&longitude=13.41", "query", "latitude=52.52&longitude=13.41"},
+		{"london", "city", "london"},
+		{"Berlin", "city", "Berlin"},
+		{"New York", "city", "New York"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
@@ -61,22 +63,22 @@ func TestClassifyQuery(t *testing.T) {
 }
 
 func TestLocateLocation(t *testing.T) {
-	got, err := Domain{}.Locate("location", "52.52,13.41")
+	got, err := Domain{}.Locate("location", "48.8,2.3")
 	if err != nil {
 		t.Fatalf("Locate error: %v", err)
 	}
-	want := "https://archive-api.open-meteo.com/v1/archive?latitude=52.52&longitude=13.41&start_date=2024-01-01&end_date=2024-01-07&daily=temperature_2m_max"
+	want := "https://archive-api.open-meteo.com/v1/archive?latitude=48.8&longitude=2.3"
 	if got != want {
 		t.Errorf("Locate = %q, want %q", got, want)
 	}
 }
 
-func TestLocateQuery(t *testing.T) {
-	got, err := Domain{}.Locate("query", "foo=bar")
+func TestLocateCity(t *testing.T) {
+	got, err := Domain{}.Locate("city", "london")
 	if err != nil {
 		t.Fatalf("Locate error: %v", err)
 	}
-	want := "https://archive-api.open-meteo.com/v1/archive?foo=bar"
+	want := "https://archive-api.open-meteo.com/v1/archive?q=london"
 	if got != want {
 		t.Errorf("Locate = %q, want %q", got, want)
 	}

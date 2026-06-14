@@ -66,62 +66,72 @@ func NewClient() *Client {
 
 // DailyRecord holds one day of historical weather observations.
 type DailyRecord struct {
-	Date          string  `kit:"id" json:"date"`
-	Latitude      float64 `json:"latitude"`
-	Longitude     float64 `json:"longitude"`
-	Timezone      string  `json:"timezone"`
+	Date          string  `json:"date" kit:"id"`
 	TempMax       float64 `json:"temp_max_c"`
 	TempMin       float64 `json:"temp_min_c"`
+	TempMean      float64 `json:"temp_mean_c"`
 	Precipitation float64 `json:"precipitation_mm"`
-	WindspeedMax  float64 `json:"windspeed_max_kmh"`
-	Elevation     float64 `json:"elevation_m"`
+	WindSpeedMax  float64 `json:"wind_speed_max_kmh"`
+	WeatherCode   int     `json:"weather_code"`
 }
 
 // HourlyRecord holds one hour of historical weather observations.
 type HourlyRecord struct {
-	Time          string  `kit:"id" json:"time"`
-	Latitude      float64 `json:"latitude"`
-	Longitude     float64 `json:"longitude"`
-	Timezone      string  `json:"timezone"`
-	Temperature   float64 `json:"temp_c"`
+	Time          string  `json:"time" kit:"id"`
+	Temperature   float64 `json:"temperature_c"`
 	Precipitation float64 `json:"precipitation_mm"`
-	Windspeed     float64 `json:"windspeed_kmh"`
+	WindSpeed     float64 `json:"wind_speed_kmh"`
+	Humidity      float64 `json:"humidity_pct"`
+	WeatherCode   int     `json:"weather_code"`
 }
 
 // wireResponse is the raw JSON shape returned by the archive API.
 type wireResponse struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-	Timezone  string  `json:"timezone"`
-	Elevation float64 `json:"elevation"`
-	Daily     *struct {
-		Time    []string  `json:"time"`
-		TempMax []float64 `json:"temperature_2m_max"`
-		TempMin []float64 `json:"temperature_2m_min"`
-		Precip  []float64 `json:"precipitation_sum"`
-		WindMax []float64 `json:"windspeed_10m_max"`
-	} `json:"daily"`
-	Hourly *struct {
-		Time   []string  `json:"time"`
-		Temp   []float64 `json:"temperature_2m"`
-		Precip []float64 `json:"precipitation"`
-		Wind   []float64 `json:"windspeed_10m"`
-	} `json:"hourly"`
+	Daily  *wireDailyData  `json:"daily"`
+	Hourly *wireHourlyData `json:"hourly"`
+	Error  string          `json:"reason"`
 }
 
-// safeGet returns slice[i] or 0.0 if i is out of bounds.
-func safeGet(slice []float64, i int) float64 {
-	if i < 0 || i >= len(slice) {
+type wireDailyData struct {
+	Time          []string  `json:"time"`
+	TempMax       []float64 `json:"temperature_2m_max"`
+	TempMin       []float64 `json:"temperature_2m_min"`
+	TempMean      []float64 `json:"temperature_2m_mean"`
+	Precipitation []float64 `json:"precipitation_sum"`
+	WindSpeedMax  []float64 `json:"wind_speed_10m_max"`
+	WeatherCode   []int     `json:"weathercode"`
+}
+
+type wireHourlyData struct {
+	Time          []string  `json:"time"`
+	Temperature   []float64 `json:"temperature_2m"`
+	Precipitation []float64 `json:"precipitation"`
+	WindSpeed     []float64 `json:"wind_speed_10m"`
+	Humidity      []float64 `json:"relative_humidity_2m"`
+	WeatherCode   []int     `json:"weathercode"`
+}
+
+// safeF returns arr[i] if i is in-bounds, 0 otherwise.
+func safeF(arr []float64, i int) float64 {
+	if i < 0 || i >= len(arr) {
 		return 0.0
 	}
-	return slice[i]
+	return arr[i]
+}
+
+// safeI returns arr[i] if i is in-bounds, 0 otherwise.
+func safeI(arr []int, i int) int {
+	if i < 0 || i >= len(arr) {
+		return 0
+	}
+	return arr[i]
 }
 
 // DailyHistory fetches daily historical weather records for the given location
 // and date range (YYYY-MM-DD). It returns one DailyRecord per day.
 func (c *Client) DailyHistory(ctx context.Context, lat, lon float64, start, end string) ([]DailyRecord, error) {
 	url := fmt.Sprintf(
-		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max&timezone=auto",
+		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,precipitation_sum,wind_speed_10m_max,weathercode&timezone=auto",
 		c.BaseURL, lat, lon, start, end,
 	)
 	body, err := c.Get(ctx, url)
@@ -132,6 +142,9 @@ func (c *Client) DailyHistory(ctx context.Context, lat, lon float64, start, end 
 	if err := json.Unmarshal(body, &wr); err != nil {
 		return nil, fmt.Errorf("decode daily response: %w", err)
 	}
+	if wr.Error != "" {
+		return nil, fmt.Errorf("api error: %s", wr.Error)
+	}
 	if wr.Daily == nil {
 		return nil, fmt.Errorf("no daily data in response")
 	}
@@ -139,14 +152,12 @@ func (c *Client) DailyHistory(ctx context.Context, lat, lon float64, start, end 
 	for i, t := range wr.Daily.Time {
 		out[i] = DailyRecord{
 			Date:          t,
-			Latitude:      wr.Latitude,
-			Longitude:     wr.Longitude,
-			Timezone:      wr.Timezone,
-			Elevation:     wr.Elevation,
-			TempMax:       safeGet(wr.Daily.TempMax, i),
-			TempMin:       safeGet(wr.Daily.TempMin, i),
-			Precipitation: safeGet(wr.Daily.Precip, i),
-			WindspeedMax:  safeGet(wr.Daily.WindMax, i),
+			TempMax:       safeF(wr.Daily.TempMax, i),
+			TempMin:       safeF(wr.Daily.TempMin, i),
+			TempMean:      safeF(wr.Daily.TempMean, i),
+			Precipitation: safeF(wr.Daily.Precipitation, i),
+			WindSpeedMax:  safeF(wr.Daily.WindSpeedMax, i),
+			WeatherCode:   safeI(wr.Daily.WeatherCode, i),
 		}
 	}
 	return out, nil
@@ -154,9 +165,9 @@ func (c *Client) DailyHistory(ctx context.Context, lat, lon float64, start, end 
 
 // HourlyHistory fetches hourly historical weather records for the given
 // location and date range (YYYY-MM-DD). It returns one HourlyRecord per hour.
-func (c *Client) HourlyHistory(ctx context.Context, lat, lon float64, start, end string) ([]HourlyRecord, error) {
+func (c *Client) HourlyHistory(ctx context.Context, lat, lon float64, start, end string, limit int) ([]HourlyRecord, error) {
 	url := fmt.Sprintf(
-		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&hourly=temperature_2m,precipitation,windspeed_10m&timezone=auto",
+		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&hourly=temperature_2m,precipitation,wind_speed_10m,relative_humidity_2m,weathercode&timezone=auto",
 		c.BaseURL, lat, lon, start, end,
 	)
 	body, err := c.Get(ctx, url)
@@ -167,19 +178,25 @@ func (c *Client) HourlyHistory(ctx context.Context, lat, lon float64, start, end
 	if err := json.Unmarshal(body, &wr); err != nil {
 		return nil, fmt.Errorf("decode hourly response: %w", err)
 	}
+	if wr.Error != "" {
+		return nil, fmt.Errorf("api error: %s", wr.Error)
+	}
 	if wr.Hourly == nil {
 		return nil, fmt.Errorf("no hourly data in response")
 	}
-	out := make([]HourlyRecord, len(wr.Hourly.Time))
-	for i, t := range wr.Hourly.Time {
+	n := len(wr.Hourly.Time)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]HourlyRecord, n)
+	for i := 0; i < n; i++ {
 		out[i] = HourlyRecord{
-			Time:          t,
-			Latitude:      wr.Latitude,
-			Longitude:     wr.Longitude,
-			Timezone:      wr.Timezone,
-			Temperature:   safeGet(wr.Hourly.Temp, i),
-			Precipitation: safeGet(wr.Hourly.Precip, i),
-			Windspeed:     safeGet(wr.Hourly.Wind, i),
+			Time:          wr.Hourly.Time[i],
+			Temperature:   safeF(wr.Hourly.Temperature, i),
+			Precipitation: safeF(wr.Hourly.Precipitation, i),
+			WindSpeed:     safeF(wr.Hourly.WindSpeed, i),
+			Humidity:      safeF(wr.Hourly.Humidity, i),
+			WeatherCode:   safeI(wr.Hourly.WeatherCode, i),
 		}
 	}
 	return out, nil
