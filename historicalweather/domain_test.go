@@ -7,8 +7,8 @@ import (
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in historicalweather_test.go.
+// and the host wiring, which need no network. The client's HTTP behaviour is
+// covered in historicalweather_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -23,11 +23,15 @@ func TestDomainInfo(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+func TestClassifyLatLon(t *testing.T) {
+	cases := []struct {
+		in  string
+		typ string
+		id  string
+	}{
+		{"52.52,13.41", "location", "52.52,13.41"},
+		{"-33.87,151.21", "location", "-33.87,151.21"},
+		{"0,0", "location", "0,0"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
@@ -38,39 +42,86 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+func TestClassifyQuery(t *testing.T) {
+	cases := []struct {
+		in  string
+		typ string
+		id  string
+	}{
+		{"Berlin", "query", "Berlin"},
+		{"latitude=52.52&longitude=13.41", "query", "latitude=52.52&longitude=13.41"},
+	}
+	for _, tc := range cases {
+		typ, id, err := Domain{}.Classify(tc.in)
+		if err != nil || typ != tc.typ || id != tc.id {
+			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
+				tc.in, typ, id, err, tc.typ, tc.id)
+		}
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
+func TestLocateLocation(t *testing.T) {
+	got, err := Domain{}.Locate("location", "52.52,13.41")
+	if err != nil {
+		t.Fatalf("Locate error: %v", err)
+	}
+	want := "https://archive-api.open-meteo.com/v1/archive?latitude=52.52&longitude=13.41&start_date=2024-01-01&end_date=2024-01-07&daily=temperature_2m_max"
+	if got != want {
+		t.Errorf("Locate = %q, want %q", got, want)
+	}
+}
+
+func TestLocateQuery(t *testing.T) {
+	got, err := Domain{}.Locate("query", "foo=bar")
+	if err != nil {
+		t.Fatalf("Locate error: %v", err)
+	}
+	want := "https://archive-api.open-meteo.com/v1/archive?foo=bar"
+	if got != want {
+		t.Errorf("Locate = %q, want %q", got, want)
+	}
+}
+
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("unknown", "foo")
+	if err == nil {
+		t.Error("expected error for unknown type, got nil")
+	}
+}
+
+func TestIsLatLon(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"52.52,13.41", true},
+		{"-90,180", true},
+		{"0,0", true},
+		{"notfloat,13.41", false},
+		{"52.52", false},
+		{"Berlin", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := isLatLon(tc.s)
+		if got != tc.want {
+			t.Errorf("isLatLon(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
+// TestHostWiring mounts the driver in a kit Host and verifies the domain is
+// registered and its ops are available.
 func TestHostWiring(t *testing.T) {
 	h, err := kit.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
+	info, ok := h.Domain("historicalweather")
+	if !ok {
+		t.Fatal("historicalweather domain not mounted on host")
 	}
-	if want := "historicalweather://page/wiki/Go"; u.String() != want {
-		t.Errorf("Mint = %q, want %q", u.String(), want)
-	}
-
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("historicalweather", "about")
-	if err != nil || got.String() != "historicalweather://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want historicalweather://page/about", got.String(), err)
+	if info.Scheme != "historicalweather" {
+		t.Errorf("scheme = %q, want historicalweather", info.Scheme)
 	}
 }

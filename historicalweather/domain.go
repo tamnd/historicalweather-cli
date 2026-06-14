@@ -2,7 +2,7 @@ package historicalweather
 
 import (
 	"context"
-	"net/url"
+	"fmt"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
@@ -19,9 +19,6 @@ import (
 // historicalweather:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone historicalweather binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the historicalweather driver. It carries no state; the per-run client is
@@ -36,40 +33,50 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "historicalweather",
-			Short:  "A command line for historicalweather.",
-			Long: `A command line for historicalweather.
-
-historicalweather reads public historicalweather data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+			Short:  "Historical weather data via Open Meteo Archive API.",
+			Long: `historicalweather reads public historical weather data from the Open Meteo
+Archive API (archive-api.open-meteo.com), shapes it into clean records, and
+prints output that pipes into the rest of your tools. No API key required.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/historicalweather-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `historicalweather page` and
-	// `ant get historicalweather://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	// daily: get daily historical weather records
+	kit.Handle(app, kit.OpMeta{
+		Name:    "daily",
+		Group:   "read",
+		List:    true,
+		Summary: "Get daily historical weather records for a location and date range",
+		Args: []kit.Arg{
+			{Name: "lat", Help: "latitude"},
+			{Name: "lon", Help: "longitude"},
+			{Name: "start", Help: "start date YYYY-MM-DD"},
+			{Name: "end", Help: "end date YYYY-MM-DD"},
+		},
+	}, dailyOp)
 
-	// List op: members of a page, the home of `historicalweather links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// historicalweather://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	// hourly: get hourly historical weather records
+	kit.Handle(app, kit.OpMeta{
+		Name:    "hourly",
+		Group:   "read",
+		List:    true,
+		Summary: "Get hourly historical weather records for a location and date range",
+		Args: []kit.Arg{
+			{Name: "lat", Help: "latitude"},
+			{Name: "lon", Help: "longitude"},
+			{Name: "start", Help: "start date YYYY-MM-DD"},
+			{Name: "end", Help: "end date YYYY-MM-DD"},
+		},
+	}, hourlyOp)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -88,86 +95,102 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type dailyInput struct {
+	Lat    float64 `kit:"arg" help:"latitude"`
+	Lon    float64 `kit:"arg" help:"longitude"`
+	Start  string  `kit:"arg" help:"start date YYYY-MM-DD"`
+	End    string  `kit:"arg" help:"end date YYYY-MM-DD"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type hourlyInput struct {
+	Lat    float64 `kit:"arg" help:"latitude"`
+	Lon    float64 `kit:"arg" help:"longitude"`
+	Start  string  `kit:"arg" help:"start date YYYY-MM-DD"`
+	End    string  `kit:"arg" help:"end date YYYY-MM-DD"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func dailyOp(ctx context.Context, in dailyInput, emit func(*DailyRecord) error) error {
+	records, err := in.Client.DailyHistory(ctx, in.Lat, in.Lon, in.Start, in.End)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for i := range records {
+		if err := emit(&records[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full historicalweather.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized historicalweather reference: %q", input)
+func hourlyOp(ctx context.Context, in hourlyInput, emit func(*HourlyRecord) error) error {
+	records, err := in.Client.HourlyHistory(ctx, in.Lat, in.Lon, in.Start, in.End)
+	if err != nil {
+		return mapErr(err)
 	}
-	return "page", id, nil
+	for i := range records {
+		if err := emit(&records[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Resolver: URI-native string functions, pure and network-free ---
+
+// Classify turns any accepted input into the canonical (type, id).
+// Recognizes "lat,lon" patterns as "location" resources; everything else is "query".
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", errs.Usage("empty historicalweather reference")
+	}
+	// "lat,lon" pattern: two floats comma-separated
+	if isLatLon(input) {
+		return "location", input, nil
+	}
+	return "query", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	switch uriType {
+	case "location":
+		parts := strings.SplitN(id, ",", 2)
+		if len(parts) != 2 {
+			return "", errs.Usage("location id must be lat,lon: %q", id)
+		}
+		return fmt.Sprintf(
+			"https://%s/v1/archive?latitude=%s&longitude=%s&start_date=2024-01-01&end_date=2024-01-07&daily=temperature_2m_max",
+			Host, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]),
+		), nil
+	case "query":
+		return fmt.Sprintf("https://%s/v1/archive?%s", Host, id), nil
+	default:
 		return "", errs.Usage("historicalweather has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
 // --- helpers ---
 
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+// isLatLon checks if the input looks like "float,float".
+func isLatLon(s string) bool {
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts) != 2 {
+		return false
 	}
-	return strings.Trim(input, "/")
+	var a, b float64
+	_, errA := fmt.Sscanf(strings.TrimSpace(parts[0]), "%g", &a)
+	_, errB := fmt.Sscanf(strings.TrimSpace(parts[1]), "%g", &b)
+	return errA == nil && errB == nil
 }
 
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// mapErr converts a library error into the kit error kind that carries the
+// right exit code.
 func mapErr(err error) error {
 	return err
 }

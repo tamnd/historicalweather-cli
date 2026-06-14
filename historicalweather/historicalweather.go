@@ -1,38 +1,50 @@
 // Package historicalweather is the library behind the historicalweather command line:
-// the HTTP client, request shaping, and the typed data models for historicalweather.
+// the HTTP client, request shaping, and the typed data models for historical
+// weather data via the Open Meteo Archive API.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// transient failures (429 and 5xx) that any public API throws under load.
 package historicalweather
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to historicalweather. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
+// DefaultUserAgent identifies the client to Open Meteo.
 const DefaultUserAgent = "historicalweather/dev (+https://github.com/tamnd/historicalweather-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at historicalweather.com; change it once you
-// know the real endpoints you want to read.
-const Host = "historicalweather.com"
+// Host is the API host this client talks to.
+const Host = "archive-api.open-meteo.com"
 
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
+// Config holds the tunable knobs for a Client.
+type Config struct {
+	BaseURL string
+	Rate    time.Duration
+	Retries int
+	Timeout time.Duration
+}
 
-// Client talks to historicalweather over HTTP.
+// DefaultConfig returns the recommended defaults.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL: "https://archive-api.open-meteo.com",
+		Rate:    200 * time.Millisecond,
+		Retries: 3,
+		Timeout: 30 * time.Second,
+	}
+}
+
+// Client talks to the Open Meteo Archive API over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
+	BaseURL   string
 	// Rate is the minimum gap between requests. Zero means no pacing.
 	Rate    time.Duration
 	Retries int
@@ -40,15 +52,137 @@ type Client struct {
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with sensible defaults.
 func NewClient() *Client {
+	cfg := DefaultConfig()
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+		HTTP:      &http.Client{Timeout: cfg.Timeout},
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		BaseURL:   cfg.BaseURL,
+		Rate:      cfg.Rate,
+		Retries:   cfg.Retries,
 	}
+}
+
+// DailyRecord holds one day of historical weather observations.
+type DailyRecord struct {
+	Date          string  `kit:"id" json:"date"`
+	Latitude      float64 `json:"latitude"`
+	Longitude     float64 `json:"longitude"`
+	Timezone      string  `json:"timezone"`
+	TempMax       float64 `json:"temp_max_c"`
+	TempMin       float64 `json:"temp_min_c"`
+	Precipitation float64 `json:"precipitation_mm"`
+	WindspeedMax  float64 `json:"windspeed_max_kmh"`
+	Elevation     float64 `json:"elevation_m"`
+}
+
+// HourlyRecord holds one hour of historical weather observations.
+type HourlyRecord struct {
+	Time          string  `kit:"id" json:"time"`
+	Latitude      float64 `json:"latitude"`
+	Longitude     float64 `json:"longitude"`
+	Timezone      string  `json:"timezone"`
+	Temperature   float64 `json:"temp_c"`
+	Precipitation float64 `json:"precipitation_mm"`
+	Windspeed     float64 `json:"windspeed_kmh"`
+}
+
+// wireResponse is the raw JSON shape returned by the archive API.
+type wireResponse struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Timezone  string  `json:"timezone"`
+	Elevation float64 `json:"elevation"`
+	Daily     *struct {
+		Time    []string  `json:"time"`
+		TempMax []float64 `json:"temperature_2m_max"`
+		TempMin []float64 `json:"temperature_2m_min"`
+		Precip  []float64 `json:"precipitation_sum"`
+		WindMax []float64 `json:"windspeed_10m_max"`
+	} `json:"daily"`
+	Hourly *struct {
+		Time   []string  `json:"time"`
+		Temp   []float64 `json:"temperature_2m"`
+		Precip []float64 `json:"precipitation"`
+		Wind   []float64 `json:"windspeed_10m"`
+	} `json:"hourly"`
+}
+
+// safeGet returns slice[i] or 0.0 if i is out of bounds.
+func safeGet(slice []float64, i int) float64 {
+	if i < 0 || i >= len(slice) {
+		return 0.0
+	}
+	return slice[i]
+}
+
+// DailyHistory fetches daily historical weather records for the given location
+// and date range (YYYY-MM-DD). It returns one DailyRecord per day.
+func (c *Client) DailyHistory(ctx context.Context, lat, lon float64, start, end string) ([]DailyRecord, error) {
+	url := fmt.Sprintf(
+		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max&timezone=auto",
+		c.BaseURL, lat, lon, start, end,
+	)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var wr wireResponse
+	if err := json.Unmarshal(body, &wr); err != nil {
+		return nil, fmt.Errorf("decode daily response: %w", err)
+	}
+	if wr.Daily == nil {
+		return nil, fmt.Errorf("no daily data in response")
+	}
+	out := make([]DailyRecord, len(wr.Daily.Time))
+	for i, t := range wr.Daily.Time {
+		out[i] = DailyRecord{
+			Date:          t,
+			Latitude:      wr.Latitude,
+			Longitude:     wr.Longitude,
+			Timezone:      wr.Timezone,
+			Elevation:     wr.Elevation,
+			TempMax:       safeGet(wr.Daily.TempMax, i),
+			TempMin:       safeGet(wr.Daily.TempMin, i),
+			Precipitation: safeGet(wr.Daily.Precip, i),
+			WindspeedMax:  safeGet(wr.Daily.WindMax, i),
+		}
+	}
+	return out, nil
+}
+
+// HourlyHistory fetches hourly historical weather records for the given
+// location and date range (YYYY-MM-DD). It returns one HourlyRecord per hour.
+func (c *Client) HourlyHistory(ctx context.Context, lat, lon float64, start, end string) ([]HourlyRecord, error) {
+	url := fmt.Sprintf(
+		"%s/v1/archive?latitude=%g&longitude=%g&start_date=%s&end_date=%s&hourly=temperature_2m,precipitation,windspeed_10m&timezone=auto",
+		c.BaseURL, lat, lon, start, end,
+	)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var wr wireResponse
+	if err := json.Unmarshal(body, &wr); err != nil {
+		return nil, fmt.Errorf("decode hourly response: %w", err)
+	}
+	if wr.Hourly == nil {
+		return nil, fmt.Errorf("no hourly data in response")
+	}
+	out := make([]HourlyRecord, len(wr.Hourly.Time))
+	for i, t := range wr.Hourly.Time {
+		out[i] = HourlyRecord{
+			Time:          t,
+			Latitude:      wr.Latitude,
+			Longitude:     wr.Longitude,
+			Timezone:      wr.Timezone,
+			Temperature:   safeGet(wr.Hourly.Temp, i),
+			Precipitation: safeGet(wr.Hourly.Precip, i),
+			Windspeed:     safeGet(wr.Hourly.Wind, i),
+		}
+	}
+	return out, nil
 }
 
 // Get fetches url and returns the response body. It paces and retries according
@@ -121,80 +255,4 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on historicalweather.com. It is a stand-in for the typed records you
-// will model from the real historicalweather endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `historicalweather cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
 }
